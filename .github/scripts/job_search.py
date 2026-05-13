@@ -121,6 +121,178 @@ def search_remotive(role_keyword: str) -> list[dict]:
         return []
 
 
+def search_themuse(role_keyword: str) -> list[dict]:
+    """Search The Muse public API — free, no key required."""
+    try:
+        resp = requests.get(
+            "https://www.themuse.com/api/public/jobs",
+            params={
+                "descending": "true",
+                "page": 0,
+                "category": "Project & Product Management,Operations & Logistics",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        # Filter by keyword match in title
+        keyword_lower = role_keyword.lower()
+        matched = [j for j in results if keyword_lower in j.get("name", "").lower()]
+        return matched
+    except Exception as e:
+        print(f"The Muse error for '{role_keyword}': {e}")
+        return []
+
+
+def normalize_themuse_job(raw: dict) -> dict:
+    """Normalize a The Muse job result."""
+    company = raw.get("company", {}).get("name", "N/A")
+    locations = raw.get("locations", [])
+    location = ", ".join(loc.get("name", "") for loc in locations) if locations else "Remote"
+    levels = raw.get("levels", [])
+    level_str = ", ".join(lv.get("name", "") for lv in levels) if levels else ""
+    title = raw.get("name", "N/A")
+    if level_str:
+        title = f"{title} ({level_str})"
+    pub_date = raw.get("publication_date", "")[:10] if raw.get("publication_date") else "N/A"
+    return {
+        "title": title,
+        "company": company,
+        "location": location,
+        "salary": "Not listed",
+        "posted": pub_date,
+        "description": summarize_description(raw.get("contents") or "", company),
+        "apply_link": raw.get("refs", {}).get("landing_page", "#"),
+        "hiring_contact": find_hiring_contact(company),
+        "company_website": get_company_website(company),
+        "source": "The Muse",
+    }
+
+
+def search_jobicy(role_keyword: str) -> list[dict]:
+    """Search Jobicy public API — free, no key required, remote-only tech jobs."""
+    try:
+        resp = requests.get(
+            "https://jobicy.com/api/v2/remote-jobs",
+            params={
+                "count": 20,
+                "tag": role_keyword,
+                "industry": "tech",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        jobs = resp.json().get("jobs", [])
+        # Filter to past 30 days
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        results = []
+        for j in jobs:
+            pub = j.get("pubDate", "")
+            try:
+                pub_dt = datetime.strptime(pub[:10], "%Y-%m-%d")
+                if pub_dt >= cutoff:
+                    results.append(j)
+            except Exception:
+                results.append(j)
+        return results
+    except Exception as e:
+        print(f"Jobicy error for '{role_keyword}': {e}")
+        return []
+
+
+def normalize_jobicy_job(raw: dict) -> dict:
+    """Normalize a Jobicy job result."""
+    company = raw.get("companyName", "N/A")
+    return {
+        "title": raw.get("jobTitle", "N/A"),
+        "company": company,
+        "location": raw.get("jobGeo", "Remote"),
+        "salary": raw.get("annualSalaryMin") and raw.get("annualSalaryMax") and
+                  f"${raw['annualSalaryMin']:,} – ${raw['annualSalaryMax']:,}" or "Not listed",
+        "posted": raw.get("pubDate", "N/A")[:10],
+        "description": summarize_description(raw.get("jobDescription") or "", company),
+        "apply_link": raw.get("url", "#"),
+        "hiring_contact": find_hiring_contact(company),
+        "company_website": get_company_website(company),
+        "source": "Jobicy",
+    }
+
+
+def search_linkedin_rss(role_keyword: str, location: str = "United States") -> list[dict]:
+    """
+    Pull LinkedIn Jobs via their public RSS feed — no auth required.
+    Returns raw parsed entries.
+    """
+    import xml.etree.ElementTree as ET
+    try:
+        keyword_encoded = requests.utils.quote(role_keyword)
+        location_encoded = requests.utils.quote(location)
+        url = (
+            f"https://www.linkedin.com/jobs/search/?keywords={keyword_encoded}"
+            f"&location={location_encoded}"
+            f"&f_WT=2,3"       # 2=remote, 3=hybrid
+            f"&f_TPR=r2592000"  # past 30 days
+            f"&position=1&pageNum=0"
+        )
+        # LinkedIn RSS feed endpoint
+        rss_url = f"https://www.linkedin.com/jobs/search.rss?keywords={keyword_encoded}&location={location_encoded}&f_WT=2,3&f_TPR=r2592000"
+        resp = requests.get(rss_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200:
+            return []
+        root = ET.fromstring(resp.content)
+        items = root.findall(".//item")
+        results = []
+        for item in items:
+            title = item.findtext("title", "N/A")
+            link = item.findtext("link", "#")
+            desc = item.findtext("description", "")
+            pub_date = item.findtext("pubDate", "N/A")
+            # Parse company and location from title (LinkedIn format: "Title at Company · Location")
+            company = "N/A"
+            location_str = "Remote"
+            if " at " in title:
+                parts = title.split(" at ", 1)
+                role_part = parts[0].strip()
+                rest = parts[1].strip()
+                if " · " in rest:
+                    co_loc = rest.split(" · ", 1)
+                    company = co_loc[0].strip()
+                    location_str = co_loc[1].strip()
+                else:
+                    company = rest
+            else:
+                role_part = title
+            results.append({
+                "title": role_part,
+                "company": company,
+                "location": location_str,
+                "description": desc,
+                "apply_link": link,
+                "posted": pub_date,
+            })
+        return results
+    except Exception as e:
+        print(f"LinkedIn RSS error for '{role_keyword}': {e}")
+        return []
+
+
+def normalize_linkedin_rss_job(raw: dict) -> dict:
+    """Normalize a LinkedIn RSS job entry."""
+    company = raw.get("company", "N/A")
+    return {
+        "title": raw.get("title", "N/A"),
+        "company": company,
+        "location": raw.get("location", "Remote"),
+        "salary": "Not listed",
+        "posted": raw.get("posted", "N/A"),
+        "description": summarize_description(raw.get("description") or "", company),
+        "apply_link": raw.get("apply_link", "#"),
+        "hiring_contact": find_hiring_contact(company),
+        "company_website": get_company_website(company),
+        "source": "LinkedIn",
+    }
+
+
 def search_adzuna(role_keyword: str) -> list[dict]:
     """Search Adzuna public API (US, no key needed for basic usage)."""
     try:
@@ -367,6 +539,57 @@ def collect_all_jobs() -> list[dict]:
         for r in raw_jobs:
             all_jobs.append(normalize_remotive_job(r))
         time.sleep(0.5)
+
+    # ── The Muse (free, no key needed) ──────────────────────────────────────────
+    themuse_searches = [
+        "product manager",
+        "senior product manager",
+        "director of product",
+        "operations manager",
+        "director of operations",
+        "product operations",
+        "technical program manager",
+        "VP product",
+        "head of product",
+    ]
+    for kw in themuse_searches:
+        raw_jobs = search_themuse(kw)
+        for r in raw_jobs:
+            all_jobs.append(normalize_themuse_job(r))
+        time.sleep(0.5)
+
+    # ── Jobicy (free, no key needed) ─────────────────────────────────────────────
+    jobicy_searches = [
+        "product manager",
+        "operations manager",
+        "product operations",
+        "director",
+        "technical program manager",
+    ]
+    for kw in jobicy_searches:
+        raw_jobs = search_jobicy(kw)
+        for r in raw_jobs:
+            all_jobs.append(normalize_jobicy_job(r))
+        time.sleep(0.5)
+
+    # ── LinkedIn RSS (free, no key needed) ───────────────────────────────────────
+    linkedin_searches = [
+        ("senior product manager", "Remote"),
+        ("director of product", "New York"),
+        ("director of product", "New Jersey"),
+        ("VP of product", "Remote"),
+        ("senior operations manager", "Remote"),
+        ("director of operations", "New York"),
+        ("director of operations", "New Jersey"),
+        ("product operations manager", "Remote"),
+        ("head of product", "Remote"),
+        ("technical program manager", "Remote"),
+    ]
+    for kw, loc in linkedin_searches:
+        raw_jobs = search_linkedin_rss(kw, loc)
+        for r in raw_jobs:
+            all_jobs.append(normalize_linkedin_rss_job(r))
+        time.sleep(1)
 
     return deduplicate(all_jobs)
 
