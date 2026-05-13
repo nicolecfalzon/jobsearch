@@ -143,57 +143,183 @@ def search_adzuna(role_keyword: str) -> list[dict]:
         return []
 
 
+def summarize_description(description: str, company_name: str) -> str:
+    """
+    Extract a short summary: up to 2 sentences about the company,
+    then up to 2 sentences about the role itself.
+    """
+    if not description:
+        return "No description available."
+
+    # Strip HTML tags if present
+    import re
+    clean = re.sub(r"<[^>]+>", " ", description)
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    # Split into sentences (naive but effective)
+    sentences = re.split(r"(?<=[.!?])\s+", clean)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+    company_sentences = []
+    role_sentences = []
+
+    company_lower = company_name.lower() if company_name else ""
+    role_keywords = {"role", "you will", "you'll", "responsibilities", "looking for",
+                     "candidate", "position", "opportunity", "join", "ideal"}
+    company_keywords = {"we are", "we're", "our company", "founded", "platform",
+                        "mission", "we build", "we help", "we provide", company_lower}
+
+    for s in sentences:
+        s_lower = s.lower()
+        if any(kw in s_lower for kw in company_keywords) and len(company_sentences) < 2:
+            company_sentences.append(s)
+        elif any(kw in s_lower for kw in role_keywords) and len(role_sentences) < 2:
+            role_sentences.append(s)
+        if len(company_sentences) >= 2 and len(role_sentences) >= 2:
+            break
+
+    # If we couldn't cleanly split, just take the first 3 sentences total
+    if not company_sentences and not role_sentences:
+        return " ".join(sentences[:3])
+
+    # Pad with sequential sentences if one bucket is empty
+    if not company_sentences and sentences:
+        company_sentences = [sentences[0]]
+    if not role_sentences and len(sentences) > 1:
+        role_sentences = [sentences[1]]
+
+    return " ".join(company_sentences + role_sentences)
+
+
+def get_direct_apply_link(raw: dict) -> str:
+    """
+    Extract the best direct apply link from a SerpApi job result.
+    Prefer apply_options (direct job board links) over related_links (often Google search pages).
+    """
+    # apply_options contains direct links to the job on LinkedIn, Indeed, etc.
+    apply_options = raw.get("apply_options") or []
+    for option in apply_options:
+        link = option.get("link", "")
+        # Prefer well-known job boards with direct listings
+        for preferred in ["linkedin.com/jobs", "indeed.com/viewjob", "greenhouse.io",
+                          "lever.co", "workday.com", "myworkdayjobs.com", "jobvite.com",
+                          "smartrecruiters.com", "ashbyhq.com", "careers."]:
+            if preferred in link:
+                return link
+    # Fall back to first apply_option if no preferred source found
+    if apply_options:
+        return apply_options[0].get("link", "#")
+    # Last resort: job_id based Google Jobs link (better than a search page)
+    job_id = raw.get("job_id", "")
+    if job_id:
+        return f"https://www.google.com/search?q={requests.utils.quote(raw.get('title',''))}+{requests.utils.quote(raw.get('company_name',''))}&ibp=htl;jobs&htidocid={job_id}"
+    return "#"
+
+
+def get_company_website(company_name: str) -> str:
+    """Return a direct link to the company's careers page or website."""
+    if not company_name or company_name == "N/A":
+        return "#"
+    # Build a Google search URL targeting the company's careers page
+    query = requests.utils.quote(f"{company_name} careers site")
+    return f"https://www.google.com/search?q={query}"
+
+
 def normalize_serpapi_job(raw: dict) -> dict:
     """Normalize a SerpApi job result into our standard schema."""
     extensions = raw.get("detected_extensions", {})
+    company = raw.get("company_name", "N/A")
     return {
         "title": raw.get("title", "N/A"),
-        "company": raw.get("company_name", "N/A"),
+        "company": company,
         "location": raw.get("location", "N/A"),
         "salary": extensions.get("salary", "Not listed"),
         "posted": extensions.get("posted_at", "N/A"),
-        "description": (raw.get("description") or "")[:400].strip() + "…",
-        "apply_link": (raw.get("related_links") or [{}])[0].get("link", raw.get("share_link", "#")),
-        "hiring_contact": find_hiring_contact(raw.get("company_name", "")),
-        "company_size": "See company profile",
+        "description": summarize_description(raw.get("description") or "", raw.get("company_name", "")),
+        "apply_link": get_direct_apply_link(raw),
+        "hiring_contact": find_hiring_contact(company),
+        "company_website": get_company_website(company),
         "source": "Google Jobs",
     }
 
 
 def normalize_remotive_job(raw: dict) -> dict:
     """Normalize a Remotive job result."""
+    company = raw.get("company_name", "N/A")
     return {
         "title": raw.get("title", "N/A"),
-        "company": raw.get("company_name", "N/A"),
+        "company": company,
         "location": raw.get("candidate_required_location", "Remote"),
         "salary": raw.get("salary", "Not listed") or "Not listed",
         "posted": raw.get("publication_date", "N/A")[:10],
-        "description": (raw.get("description") or "")[:400].strip() + "…",
+        "description": summarize_description(raw.get("description") or "", raw.get("company_name", "")),
         "apply_link": raw.get("url", "#"),
-        "hiring_contact": find_hiring_contact(raw.get("company_name", "")),
-        "company_size": "See company profile",
+        "hiring_contact": find_hiring_contact(company),
+        "company_website": get_company_website(company),
         "source": "Remotive",
     }
 
 
 def find_hiring_contact(company_name: str) -> str:
-    """Return a LinkedIn search URL for HR/Talent at the given company."""
+    """
+    Return a LinkedIn people search URL scoped to the exact company,
+    filtered to recruiter / HR / talent acquisition roles.
+    Uses LinkedIn's currentCompany + keywords filters for precision.
+    """
     if not company_name or company_name == "N/A":
         return "#"
-    query = requests.utils.quote(f"{company_name} recruiter OR talent acquisition OR HR")
-    return f"https://www.linkedin.com/search/results/people/?keywords={query}"
+    # LinkedIn people search with title keywords and company name scoped in
+    # keywords field. The `titleFreeText` param filters by current job title.
+    keywords = requests.utils.quote("recruiter OR \"talent acquisition\" OR \"HR business partner\" OR \"human resources\"")
+    company_encoded = requests.utils.quote(company_name)
+    return (
+        f"https://www.linkedin.com/search/results/people/"
+        f"?keywords={keywords}"
+        f"&titleFreeText=recruiter%20OR%20talent%20OR%20HR"
+        f"&company={company_encoded}"
+        f"&origin=FACETED_SEARCH"
+    )
 
 
 # ─── Deduplication ─────────────────────────────────────────────────────────────
 
+def normalize_text(text: str) -> str:
+    """Normalize text for fuzzy comparison."""
+    replacements = {
+        "sr.": "senior", "sr ": "senior ", "vp": "vice president",
+        "mgr": "manager", "dir.": "director", "dir ": "director ",
+        "&": "and", "-": " ", "/": " "
+    }
+    text = text.lower().strip()
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    # Remove extra spaces
+    return " ".join(text.split())
+
+
+def titles_are_similar(t1: str, t2: str) -> bool:
+    """Return True if two job titles are close enough to be considered duplicates."""
+    n1, n2 = normalize_text(t1), normalize_text(t2)
+    if n1 == n2:
+        return True
+    # Check if one is a substring of the other (e.g. "Product Manager" vs "Senior Product Manager")
+    if n1 in n2 or n2 in n1:
+        return True
+    return False
+
+
 def deduplicate(jobs: list[dict]) -> list[dict]:
-    """Remove duplicate listings by (title, company) pair."""
-    seen = set()
+    """Remove duplicate listings using fuzzy title + exact company matching."""
     unique = []
     for job in jobs:
-        key = (job["title"].lower().strip(), job["company"].lower().strip())
-        if key not in seen:
-            seen.add(key)
+        company_key = normalize_text(job["company"])
+        is_dup = False
+        for existing in unique:
+            if normalize_text(existing["company"]) == company_key:
+                if titles_are_similar(existing["title"], job["title"]):
+                    is_dup = True
+                    break
+        if not is_dup:
             unique.append(job)
     return unique
 
@@ -304,7 +430,7 @@ JOB_CARD_TEMPLATE = """
   <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px;">
     <div>
       <h3 style="margin:0 0 4px 0;font-size:18px;color:#1a202c;font-weight:700;">{title}</h3>
-      <p style="margin:0;font-size:15px;color:#4a5568;font-weight:600;">{company}</p>
+      <a href="{company_website}" style="margin:0;font-size:15px;color:#4f46e5;font-weight:600;text-decoration:none;">{company} ↗</a>
     </div>
     <span style="background:#ebf8ff;color:#2b6cb0;padding:4px 12px;border-radius:20px;
                  font-size:13px;font-weight:600;white-space:nowrap;">{source}</span>
@@ -314,10 +440,6 @@ JOB_CARD_TEMPLATE = """
     <span style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:6px;
                  padding:4px 10px;font-size:13px;color:#4a5568;">
       📍 {location}
-    </span>
-    <span style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:6px;
-                 padding:4px 10px;font-size:13px;color:#4a5568;">
-      🏢 {company_size}
     </span>
     <span style="background:{salary_bg};border:1px solid #e2e8f0;border-radius:6px;
                  padding:4px 10px;font-size:13px;color:{salary_color};font-weight:600;">
@@ -364,8 +486,8 @@ def build_email_html(jobs: list[dict]) -> str:
             cards += JOB_CARD_TEMPLATE.format(
                 title=job["title"],
                 company=job["company"],
+                company_website=job["company_website"],
                 location=job["location"],
-                company_size=job["company_size"],
                 salary=job["salary"],
                 salary_bg="#f0fff4" if salary_has_data else "#f7fafc",
                 salary_color="#276749" if salary_has_data else "#718096",
