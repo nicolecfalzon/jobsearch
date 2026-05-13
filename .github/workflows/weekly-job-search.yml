@@ -1,0 +1,35 @@
+name: Weekly Job Search Digest
+
+on:
+  schedule:
+    # Every Monday at 10:00 AM EST (15:00 UTC)
+    - cron: '0 15 * * 1'
+  workflow_dispatch: # Allow manual trigger for testing
+
+jobs:
+  send-job-digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r .github/scripts/requirements.txt
+
+      - name: Run job search and send email
+        env:
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          SENDER_EMAIL: ncgregoriou@gmail.com
+          RECIPIENT_EMAIL: nicolecfalzon@gmail.com
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+        run: |
+          python .github/scripts/job_search.py
