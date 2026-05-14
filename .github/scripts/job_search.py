@@ -29,18 +29,24 @@ ROLES = [
     "Operations Manager",
     "Senior Operations Manager",
     "Director of Operations",
-    "VP of Operations",
-    "Head of Operations",
+    "Director of Operations and Strategy",
+    "Operations and Strategy Manager",
+    "Senior Operations and Strategy Manager",
     "Product Manager",
     "Senior Product Manager",
     "Director of Product Management",
-    "VP of Product",
-    "Head of Product",
+    "Director of Product",
     "Product Operations Manager",
     "Senior Product Operations Manager",
     "Director of Product Operations",
     "Technical Program Manager",
     "Senior Technical Program Manager",
+    "Strategy and Operations Manager",
+    "Senior Strategy and Operations Manager",
+    "Director of Strategy and Operations",
+    "Business Operations Manager",
+    "Senior Business Operations Manager",
+    "Director of Business Operations",
 ]
 
 LOCATION_TERMS = [
@@ -317,50 +323,52 @@ def search_adzuna(role_keyword: str) -> list[dict]:
 
 def summarize_description(description: str, company_name: str) -> str:
     """
-    Extract a short summary: up to 2 sentences about the company,
-    then up to 2 sentences about the role itself.
+    Return a tight 3-sentence max snippet: 1-2 sentences on the company,
+    1-2 sentences on the role. Hard cap of 3 sentences total.
     """
     if not description:
         return "No description available."
 
-    # Strip HTML tags if present
     import re
+    # Strip HTML tags
     clean = re.sub(r"<[^>]+>", " ", description)
     clean = re.sub(r"\s+", " ", clean).strip()
 
-    # Split into sentences (naive but effective)
+    # Split into sentences
     sentences = re.split(r"(?<=[.!?])\s+", clean)
     sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
 
-    company_sentences = []
-    role_sentences = []
+    if not sentences:
+        return "No description available."
 
     company_lower = company_name.lower() if company_name else ""
-    role_keywords = {"role", "you will", "you'll", "responsibilities", "looking for",
-                     "candidate", "position", "opportunity", "join", "ideal"}
     company_keywords = {"we are", "we're", "our company", "founded", "platform",
                         "mission", "we build", "we help", "we provide", company_lower}
+    role_keywords = {"you will", "you'll", "responsibilities", "looking for",
+                     "candidate", "this role", "the role", "you'll own", "you'll lead"}
 
-    for s in sentences:
-        s_lower = s.lower()
-        if any(kw in s_lower for kw in company_keywords) and len(company_sentences) < 2:
-            company_sentences.append(s)
-        elif any(kw in s_lower for kw in role_keywords) and len(role_sentences) < 2:
-            role_sentences.append(s)
-        if len(company_sentences) >= 2 and len(role_sentences) >= 2:
-            break
+    company_sent = next((s for s in sentences if any(kw in s.lower() for kw in company_keywords)), None)
+    role_sent = next((s for s in sentences if any(kw in s.lower() for kw in role_keywords)), None)
 
-    # If we couldn't cleanly split, just take the first 3 sentences total
-    if not company_sentences and not role_sentences:
-        return " ".join(sentences[:3])
+    # Build result: 1 company + 1 role sentence if found, else first 2-3 sentences
+    result = []
+    if company_sent:
+        result.append(company_sent)
+    if role_sent and role_sent != company_sent:
+        result.append(role_sent)
 
-    # Pad with sequential sentences if one bucket is empty
-    if not company_sentences and sentences:
-        company_sentences = [sentences[0]]
-    if not role_sentences and len(sentences) > 1:
-        role_sentences = [sentences[1]]
+    # If we didn't find categorized sentences, just take the first 2
+    if not result:
+        result = sentences[:2]
+    # If we only found one, add the next available sentence for context
+    elif len(result) == 1:
+        for s in sentences:
+            if s not in result:
+                result.append(s)
+                break
 
-    return " ".join(company_sentences + role_sentences)
+    # Hard cap at 3 sentences
+    return " ".join(result[:3])
 
 
 def get_direct_apply_link(raw: dict) -> str:
@@ -507,16 +515,18 @@ def collect_all_jobs() -> list[dict]:
             # Operations roles
             ("senior operations manager tech company remote OR hybrid", ""),
             ("director of operations technology remote OR hybrid New York New Jersey", ""),
-            ("VP operations tech startup remote", ""),
+            ("strategy and operations manager tech remote hybrid", ""),
+            ("director strategy operations tech remote hybrid NJ NY", ""),
             ("product operations manager senior tech remote hybrid", ""),
             # Product roles
             ("senior product manager tech company remote", ""),
             ("director of product management remote OR hybrid NY NJ", ""),
-            ("VP of product tech remote", ""),
-            ("head of product remote hybrid New York", ""),
+            ("director of product remote hybrid New York", ""),
             # Blend roles
             ("product operations director remote hybrid NJ NY", ""),
             ("technical program manager senior remote hybrid", ""),
+            ("business operations manager senior tech remote", ""),
+            ("director business operations tech remote hybrid NY NJ", ""),
         ]
         for query, loc in serpapi_queries:
             raw_jobs = search_jobs_serpapi(query, loc)
@@ -530,8 +540,7 @@ def collect_all_jobs() -> list[dict]:
         "operations manager",
         "product operations",
         "director product",
-        "VP product",
-        "head of product",
+        "strategy and operations",
         "technical program manager",
     ]
     for kw in remotive_searches:
@@ -549,8 +558,8 @@ def collect_all_jobs() -> list[dict]:
         "director of operations",
         "product operations",
         "technical program manager",
-        "VP product",
-        "head of product",
+        "strategy and operations",
+        "business operations",
     ]
     for kw in themuse_searches:
         raw_jobs = search_themuse(kw)
@@ -577,13 +586,14 @@ def collect_all_jobs() -> list[dict]:
         ("senior product manager", "Remote"),
         ("director of product", "New York"),
         ("director of product", "New Jersey"),
-        ("VP of product", "Remote"),
         ("senior operations manager", "Remote"),
         ("director of operations", "New York"),
         ("director of operations", "New Jersey"),
         ("product operations manager", "Remote"),
-        ("head of product", "Remote"),
+        ("strategy and operations manager", "Remote"),
+        ("director strategy and operations", "New York"),
         ("technical program manager", "Remote"),
+        ("business operations manager senior", "Remote"),
     ]
     for kw, loc in linkedin_searches:
         raw_jobs = search_linkedin_rss(kw, loc)
@@ -605,9 +615,12 @@ def filter_jobs(jobs: list[dict]) -> list[dict]:
         "remote", "anywhere", "hybrid", "new york", "new jersey", "ny", "nj", "nyc"
     }
     seniority_keywords = {
-        "senior", "sr.", "sr ", "director", "vp", "vice president",
-        "head of", "lead", "principal", "manager"
+        "senior", "sr.", "sr ", "director", "lead", "principal", "manager",
+        "strategy", "operations & strategy", "strategy & operations",
+        "strategy and operations", "operations and strategy",
     }
+    # Exclude VP and above
+    exclude_seniority = {"vp", "vice president", "head of", "chief", "coo", "cto", "cpo"}
     # Exclude clearly non-tech industries
     exclude_keywords = {
         "retail", "restaurant", "food service", "hospitality", "healthcare clinic",
@@ -630,9 +643,13 @@ def filter_jobs(jobs: list[dict]) -> list[dict]:
         if "hybrid" in loc and not any(kw in loc for kw in {"new york", "new jersey", "ny", "nj", "nyc"}):
             continue
 
-        # Seniority check
+        # Seniority check — must match target level
         seniority_ok = any(kw in title for kw in seniority_keywords)
         if not seniority_ok:
+            continue
+
+        # Exclude VP and above
+        if any(kw in title for kw in exclude_seniority):
             continue
 
         # Soft exclude non-tech
@@ -653,7 +670,8 @@ JOB_CARD_TEMPLATE = """
   <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px;">
     <div>
       <h3 style="margin:0 0 4px 0;font-size:18px;color:#1a202c;font-weight:700;">{title}</h3>
-      <a href="{company_website}" style="margin:0;font-size:15px;color:#4f46e5;font-weight:600;text-decoration:none;">{company} ↗</a>
+      <a href="{company_website}" style="margin:0;font-size:15px;color:#4f46e5;font-weight:600;
+         text-decoration:underline;" target="_blank">{company}</a>
     </div>
     <span style="background:#ebf8ff;color:#2b6cb0;padding:4px 12px;border-radius:20px;
                  font-size:13px;font-weight:600;white-space:nowrap;">{source}</span>
