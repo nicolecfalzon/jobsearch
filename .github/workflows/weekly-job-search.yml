@@ -2,7 +2,7 @@ name: Weekly Job Search Digest
 
 on:
   schedule:
-    # Every Monday at 10:00 AM EST (15:00 UTC)
+    # Every Monday at 9:00 AM EST (15:00 UTC)
     - cron: '0 15 * * 1'
   workflow_dispatch: # Allow manual trigger for testing
 
