@@ -347,28 +347,47 @@ def summarize_description(description: str, company_name: str) -> str:
     role_keywords = {"you will", "you'll", "responsibilities", "looking for",
                      "candidate", "this role", "the role", "you'll own", "you'll lead"}
 
+def summarize_description(description: str, company_name: str) -> str:
+    """
+    Return a tight snippet capped at 200 characters max.
+    Picks the best 1 sentence about the company and 1 about the role.
+    """
+    if not description:
+        return "No description available."
+
+    import re
+    clean = re.sub(r"<[^>]+>", " ", description)
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    sentences = re.split(r"(?<=[.!?])\s+", clean)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+    if not sentences:
+        return "No description available."
+
+    company_lower = company_name.lower() if company_name else ""
+    company_keywords = {"we are", "we're", "our company", "founded", "platform",
+                        "mission", "we build", "we help", "we provide", company_lower}
+    role_keywords = {"you will", "you'll", "responsibilities", "looking for",
+                     "candidate", "this role", "the role", "you'll own", "you'll lead"}
+
     company_sent = next((s for s in sentences if any(kw in s.lower() for kw in company_keywords)), None)
     role_sent = next((s for s in sentences if any(kw in s.lower() for kw in role_keywords)), None)
 
-    # Build result: 1 company + 1 role sentence if found, else first 2-3 sentences
-    result = []
-    if company_sent:
-        result.append(company_sent)
-    if role_sent and role_sent != company_sent:
-        result.append(role_sent)
+    if company_sent and role_sent and company_sent != role_sent:
+        result = f"{company_sent} {role_sent}"
+    elif company_sent:
+        result = company_sent
+    elif role_sent:
+        result = role_sent
+    else:
+        result = sentences[0]
 
-    # If we didn't find categorized sentences, just take the first 2
-    if not result:
-        result = sentences[:2]
-    # If we only found one, add the next available sentence for context
-    elif len(result) == 1:
-        for s in sentences:
-            if s not in result:
-                result.append(s)
-                break
+    # Hard cap at 200 characters — cut cleanly at last word boundary
+    if len(result) > 200:
+        result = result[:197].rsplit(" ", 1)[0] + "..."
 
-    # Hard cap at 3 sentences
-    return " ".join(result[:3])
+    return result
 
 
 def get_direct_apply_link(raw: dict) -> str:
@@ -633,22 +652,57 @@ def filter_jobs(jobs: list[dict]) -> list[dict]:
 
     filtered = []
     for job in jobs:
-        loc = job["location"].lower()
+        loc = job["location"].lower().strip()
         title = job["title"].lower()
         desc = job["description"].lower()
         company = job["company"].lower()
 
-        # Fractional roles bypass location/seniority filters — they're globally remote by nature
+        # Fractional roles bypass location/seniority filters
         if job.get("is_fractional"):
-            if not any(kw in combined for kw in exclude_keywords
-                       for combined in [f"{company} {desc}"]):
+            combined = f"{company} {desc}"
+            if not any(kw in combined for kw in exclude_keywords):
                 filtered.append(job)
             continue
 
-        # Location check
-        if not any(kw in loc for kw in location_keywords):
+        # ── Location check — only inspect the location field ──────────────────
+        loc_clean = loc.strip()
+
+        # Case 1: Fully remote — accept regardless of any other location detail
+        is_remote = any(kw in loc_clean for kw in {
+            "remote", "anywhere", "distributed", "work from home", "wfh"
+        })
+
+        # Case 2: Hybrid — must mention NJ or NY (any town, city, or borough)
+        # Matches: "Hybrid - New York, NY", "Hybrid (Hoboken, NJ)", "Jersey City, NJ (Hybrid)", etc.
+        in_nj_or_ny = any(kw in loc_clean for kw in {
+            "new york", "new jersey", ", ny", ", nj", "(ny)", "(nj)",
+            "nyc", "brooklyn", "queens", "bronx", "staten island",
+            "manhattan", "hoboken", "jersey city", "newark", "princeton",
+            "parsippany", "morristown", "summit", "short hills", "montclair",
+            "edison", "iselin", "basking ridge", "bridgewater", "white plains",
+            "stamford",  # just over CT border, common NJ/NY commuter hub
+        })
+        is_hybrid_njny = "hybrid" in loc_clean and in_nj_or_ny
+
+        # Also allow plain NJ/NY listings with no explicit remote/hybrid label
+        is_njny_onsite = in_nj_or_ny and not any(kw in loc_clean for kw in {
+            "chicago", "seattle", "austin", "boston", "denver", "atlanta",
+            "dallas", "houston", "phoenix", "los angeles", "san francisco",
+            "washington", "miami", "minneapolis", "portland", "detroit",
+        })
+
+        if not (is_remote or is_hybrid_njny or is_njny_onsite):
             continue
-        if "hybrid" in loc and not any(kw in loc for kw in {"new york", "new jersey", "ny", "nj", "nyc"}):
+
+        # Hard exclude non-NJ/NY locations even if they sneak through above
+        exclude_locations = {
+            "seattle", ", wa", "chicago", ", il", "austin", ", tx",
+            "boston", ", ma", "denver", ", co", "atlanta", ", ga",
+            "dallas", "houston", "phoenix", ", az", "los angeles",
+            "san francisco", ", ca", "washington, dc", "miami", ", fl",
+            "minneapolis", ", mn", "portland", ", or", "detroit", ", mi",
+        }
+        if not is_remote and any(kw in loc_clean for kw in exclude_locations):
             continue
 
         # Seniority check
@@ -657,7 +711,7 @@ def filter_jobs(jobs: list[dict]) -> list[dict]:
         if any(kw in title for kw in exclude_seniority):
             continue
 
-        # Soft exclude non-tech
+        # Soft exclude non-tech industries
         combined = f"{company} {desc}"
         if any(kw in combined for kw in exclude_keywords):
             continue
@@ -758,112 +812,161 @@ def tag_and_score_jobs(jobs: list[dict]) -> list[dict]:
 # ─── Email Composition ─────────────────────────────────────────────────────────
 
 JOB_CARD_TEMPLATE = """
-<div style="background:#ffffff;border:1px solid {border_color};border-radius:12px;
-            padding:20px 24px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+<div style="background:#ffffff;border:1px solid {border_color};border-radius:14px;
+            padding:22px 24px;margin-bottom:20px;box-shadow:0 2px 6px rgba(0,0,0,0.06);">
 
-  <!-- Title + Company -->
-  <div style="margin-bottom:10px;">
-    <h3 style="margin:0 0 3px 0;font-size:17px;color:#1a202c;font-weight:700;line-height:1.3;">{title}</h3>
-    <a href="{company_website}" style="font-size:14px;color:#4f46e5;font-weight:600;text-decoration:underline;"
-       target="_blank">{company}</a>
+  <!-- Top row: title + source badge -->
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;
+              flex-wrap:wrap;gap:8px;margin-bottom:6px;">
+    <h3 style="margin:0;font-size:17px;color:#1a202c;font-weight:800;line-height:1.3;
+               flex:1;">{title}</h3>
+    <span style="background:{badge_bg};color:{badge_color};padding:3px 10px;border-radius:20px;
+                 font-size:11px;font-weight:700;letter-spacing:0.5px;white-space:nowrap;
+                 text-transform:uppercase;">{source}</span>
   </div>
 
-  <!-- Meta pills -->
-  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
-    <span style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:5px;
-                 padding:3px 9px;font-size:12px;color:#4a5568;">📍 {location}</span>
-    <span style="background:{salary_bg};border:1px solid #e2e8f0;border-radius:5px;
-                 padding:3px 9px;font-size:12px;color:{salary_color};font-weight:600;">💰 {salary}</span>
-    <span style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:5px;
-                 padding:3px 9px;font-size:12px;color:#718096;">📅 {posted}</span>
-    <span style="background:#ebf8ff;border:1px solid #bee3f8;border-radius:5px;
-                 padding:3px 9px;font-size:12px;color:#2b6cb0;">{source}</span>
-  </div>
+  <!-- Company name -->
+  <a href="{company_website}" target="_blank"
+     style="font-size:14px;color:#4f46e5;font-weight:700;text-decoration:none;
+            display:inline-block;margin-bottom:14px;">{company} ↗</a>
 
-  <!-- Description: 1 sentence company + 1 sentence role -->
-  <p style="margin:0 0 10px 0;font-size:13px;color:#4a5568;line-height:1.6;">{description}</p>
+  <!-- Bullet point details -->
+  <table style="width:100%;border-collapse:collapse;margin-bottom:14px;">
+    <tr>
+      <td style="padding:4px 0;font-size:13px;color:#4a5568;width:50%;vertical-align:top;">
+        📍 <strong>Location:</strong> {location}
+      </td>
+      <td style="padding:4px 0;font-size:13px;color:{salary_color};width:50%;vertical-align:top;">
+        💰 <strong>Salary:</strong> {salary}
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:4px 0;font-size:13px;color:#4a5568;vertical-align:top;">
+        📅 <strong>Posted:</strong> {posted}
+      </td>
+      <td style="padding:4px 0;font-size:13px;color:#4a5568;vertical-align:top;">
+        🏷 <strong>Type:</strong> {job_type}
+      </td>
+    </tr>
+  </table>
+
+  <!-- Divider -->
+  <div style="border-top:1px solid #f0f0f0;margin-bottom:12px;"></div>
+
+  <!-- Description -->
+  <p style="margin:0 0 12px 0;font-size:13px;color:#555e6e;line-height:1.65;">
+    {description}
+  </p>
 
   <!-- Fit note -->
   {fit_note_html}
 
   <!-- Apply button -->
-  <a href="{apply_link}" style="display:inline-block;margin-top:12px;background:#4f46e5;color:#ffffff;
-     padding:9px 18px;border-radius:7px;text-decoration:none;font-size:13px;font-weight:600;">
+  <a href="{apply_link}" target="_blank"
+     style="display:inline-block;margin-top:14px;background:#4f46e5;color:#ffffff;
+            padding:10px 22px;border-radius:8px;text-decoration:none;font-size:13px;
+            font-weight:700;letter-spacing:0.3px;">
     Apply Now →
   </a>
+
 </div>
 """
 
 FIT_NOTE_HTML = """
-  <div style="background:#f0fdf4;border-left:3px solid #22c55e;padding:8px 12px;
-              border-radius:0 6px 6px 0;margin-bottom:4px;">
-    <p style="margin:0;font-size:12px;color:#166534;line-height:1.5;">
-      <strong>✨ Why you're a fit:</strong> {fit_note}
-    </p>
-  </div>
+<div style="background:#f0fdf4;border-left:4px solid #22c55e;border-radius:0 8px 8px 0;
+            padding:10px 14px;margin-bottom:4px;">
+  <p style="margin:0;font-size:12px;color:#166534;line-height:1.6;">
+    <strong>✨ Why you're a fit:</strong> {fit_note}
+  </p>
+</div>
 """
 
 SECTION_HEADER_TEMPLATE = """
-<div style="margin:32px 0 16px 0;">
-  <div style="background:{bg};border-radius:10px;padding:16px 20px;">
-    <h2 style="margin:0 0 4px 0;font-size:20px;font-weight:800;color:{color};">{icon} {title}</h2>
+<div style="margin:36px 0 18px 0;">
+  <div style="background:{bg};border-radius:12px;padding:18px 22px;
+              border-left:5px solid {accent};">
+    <h2 style="margin:0 0 5px 0;font-size:19px;font-weight:800;color:{color};">
+      {icon} {title}
+    </h2>
     <p style="margin:0;font-size:13px;color:{subcolor};">{subtitle}</p>
   </div>
 </div>
 """
 
 
+def get_source_badge_style(source: str) -> tuple[str, str]:
+    """Return (bg_color, text_color) for the source badge."""
+    styles = {
+        "LinkedIn":    ("#dbeafe", "#1e40af"),
+        "Google Jobs": ("#ede9fe", "#5b21b6"),
+        "Remotive":    ("#dcfce7", "#166534"),
+        "The Muse":    ("#fef3c7", "#92400e"),
+        "Jobicy":      ("#fce7f3", "#9d174d"),
+    }
+    return styles.get(source, ("#f1f5f9", "#475569"))
+
+
 def render_cards(jobs: list[dict], top_fit_threshold: int = 55) -> str:
     """Render a list of job dicts into HTML cards."""
     if not jobs:
-        return '<p style="color:#718096;font-size:14px;padding:12px 0;">No matching roles found this week.</p>'
+        return """
+        <div style="text-align:center;padding:32px 24px;background:#f8fafc;
+                    border-radius:12px;border:1px dashed #cbd5e1;">
+          <p style="margin:0;color:#94a3b8;font-size:14px;">
+            No matching roles found this week — check back next Monday!
+          </p>
+        </div>"""
 
     html = ""
     for job in jobs:
         salary_has_data = job["salary"] not in ("Not listed", "", None, "N/A")
         is_top = job.get("fit_score", 0) >= top_fit_threshold
-
+        badge_bg, badge_color = get_source_badge_style(job["source"])
         fit_note_html = FIT_NOTE_HTML.format(fit_note=job.get("fit_note", "")) if job.get("fit_note") else ""
+        job_type = "Fractional / Contract" if job.get("is_fractional") else "Full-Time"
 
         html += JOB_CARD_TEMPLATE.format(
             title=job["title"],
             company=job["company"],
             company_website=job["company_website"],
             location=job["location"],
-            salary=job["salary"],
-            salary_bg="#f0fff4" if salary_has_data else "#f7fafc",
-            salary_color="#276749" if salary_has_data else "#718096",
+            salary=job["salary"] if salary_has_data else "Not listed",
+            salary_color="#166534" if salary_has_data else "#94a3b8",
             posted=job["posted"],
+            job_type=job_type,
             description=job["description"],
             apply_link=job["apply_link"],
             source=job["source"],
+            badge_bg=badge_bg,
+            badge_color=badge_color,
             fit_note_html=fit_note_html,
-            border_color="#bbf7d0" if is_top else "#e2e8f0",
+            border_color="#86efac" if is_top else "#e2e8f0",
         )
     return html
 
 
 def build_email_html(fulltime_jobs: list[dict], fractional_jobs: list[dict]) -> str:
     today = datetime.now().strftime("%B %d, %Y")
-    total = len(fulltime_jobs) + len(fractional_jobs)
 
-    # Sort full-time: top fit first, then by salary availability
+    # Sort: top fit first, then salary-disclosed
     fulltime_jobs.sort(key=lambda j: (-j.get("fit_score", 0),
                                        j["salary"] in ("Not listed", "", None, "N/A")))
     fractional_jobs.sort(key=lambda j: (-j.get("fit_score", 0),
                                          j["salary"] in ("Not listed", "", None, "N/A")))
 
     ft_section = SECTION_HEADER_TEMPLATE.format(
-        bg="#eef2ff", color="#3730a3", subcolor="#6366f1",
+        bg="#eef2ff", accent="#4f46e5", color="#3730a3", subcolor="#6366f1",
         icon="💼", title="Full-Time Roles",
-        subtitle=f"{len(fulltime_jobs)} role{'s' if len(fulltime_jobs) != 1 else ''} · Remote or Hybrid (NJ/NY) · PM, Operations & Strategy"
+        subtitle=f"{len(fulltime_jobs)} role{'s' if len(fulltime_jobs) != 1 else ''} · Remote or Hybrid (NJ / NY) · PM, Operations & Strategy"
     ) + render_cards(fulltime_jobs)
 
     frac_section = SECTION_HEADER_TEMPLATE.format(
-        bg="#fdf4ff", color="#7e22ce", subcolor="#a855f7",
+        bg="#fdf4ff", accent="#a855f7", color="#7e22ce", subcolor="#a855f7",
         icon="⚡", title="Fractional & Contract Opportunities",
-        subtitle=f"{len(fractional_jobs)} opportunit{'ies' if len(fractional_jobs) != 1 else 'y'} · Flexible engagements in PM, Operations & Strategy"
+        subtitle=f"{len(fractional_jobs)} opportunit{'ies' if len(fractional_jobs) != 1 else 'y'} · Flexible engagements · PM, Operations & Strategy"
     ) + render_cards(fractional_jobs)
+
+    top_count = sum(1 for j in fulltime_jobs + fractional_jobs if j.get("fit_score", 0) >= 55)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -876,36 +979,60 @@ def build_email_html(fulltime_jobs: list[dict], fractional_jobs: list[dict]) -> 
              'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
 
   <!-- Header -->
-  <div style="background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 100%);padding:36px 24px;text-align:center;">
-    <p style="margin:0 0 6px 0;color:#c7d2fe;font-size:13px;letter-spacing:2px;
+  <div style="background:linear-gradient(135deg,#4338ca 0%,#7c3aed 100%);
+              padding:40px 24px 32px;text-align:center;">
+    <p style="margin:0 0 8px 0;color:#c7d2fe;font-size:12px;letter-spacing:3px;
               text-transform:uppercase;font-weight:600;">Weekly Job Digest</p>
-    <h1 style="margin:0 0 6px 0;color:#ffffff;font-size:28px;font-weight:800;">
+    <h1 style="margin:0 0 10px 0;color:#ffffff;font-size:30px;font-weight:800;line-height:1.2;">
       Hey Nicole, here are your matches 👋
     </h1>
     <p style="margin:0;color:#a5b4fc;font-size:15px;">{today}</p>
   </div>
 
-  <!-- Summary bar -->
-  <div style="background:#ffffff;border-bottom:1px solid #e2e8f0;padding:14px 24px;text-align:center;">
-    <p style="margin:0;font-size:14px;color:#4a5568;">
-      <strong style="color:#4f46e5;">{len(fulltime_jobs)} full-time</strong> and
-      <strong style="color:#7c3aed;">{len(fractional_jobs)} fractional</strong> roles this week
-      &nbsp;·&nbsp; Roles highlighted in green are top fits based on your resume
+  <!-- Stats bar -->
+  <div style="background:#ffffff;border-bottom:2px solid #e2e8f0;padding:0;">
+    <div style="display:flex;max-width:680px;margin:0 auto;">
+      <div style="flex:1;text-align:center;padding:16px 8px;border-right:1px solid #f0f0f0;">
+        <p style="margin:0;font-size:22px;font-weight:800;color:#4f46e5;">{len(fulltime_jobs)}</p>
+        <p style="margin:0;font-size:11px;color:#94a3b8;text-transform:uppercase;
+                  letter-spacing:1px;font-weight:600;">Full-Time</p>
+      </div>
+      <div style="flex:1;text-align:center;padding:16px 8px;border-right:1px solid #f0f0f0;">
+        <p style="margin:0;font-size:22px;font-weight:800;color:#7c3aed;">{len(fractional_jobs)}</p>
+        <p style="margin:0;font-size:11px;color:#94a3b8;text-transform:uppercase;
+                  letter-spacing:1px;font-weight:600;">Fractional</p>
+      </div>
+      <div style="flex:1;text-align:center;padding:16px 8px;">
+        <p style="margin:0;font-size:22px;font-weight:800;color:#16a34a;">{top_count}</p>
+        <p style="margin:0;font-size:11px;color:#94a3b8;text-transform:uppercase;
+                  letter-spacing:1px;font-weight:600;">Top Fits ✨</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Legend -->
+  <div style="background:#fffbeb;border-bottom:1px solid #fde68a;padding:10px 24px;
+              text-align:center;">
+    <p style="margin:0;font-size:12px;color:#92400e;">
+      🟢 <strong>Green border</strong> = top fit based on your resume &nbsp;·&nbsp;
+      ✨ <strong>Why you're a fit</strong> notes appear on matching roles
     </p>
   </div>
 
   <!-- Content -->
-  <div style="max-width:680px;margin:24px auto;padding:0 16px;">
+  <div style="max-width:680px;margin:0 auto;padding:8px 16px 40px;">
     {ft_section}
-    <div style="margin-top:36px;">
-      {frac_section}
-    </div>
+    {frac_section}
   </div>
 
   <!-- Footer -->
-  <div style="text-align:center;padding:28px 24px;color:#a0aec0;font-size:12px;">
-    <p style="margin:0 0 4px 0;">Sent every Monday at 10 AM · Jobs posted in the past 30 days</p>
-    <p style="margin:0;">Always verify listing details before applying.</p>
+  <div style="background:#1e1b4b;text-align:center;padding:28px 24px;">
+    <p style="margin:0 0 6px 0;color:#a5b4fc;font-size:13px;font-weight:600;">
+      Nicole's Weekly Job Digest
+    </p>
+    <p style="margin:0;color:#6366f1;font-size:12px;">
+      Sent every Monday at 10 AM · Jobs posted in the last 30 days · Always verify before applying
+    </p>
   </div>
 
 </body>
