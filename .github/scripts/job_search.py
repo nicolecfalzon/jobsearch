@@ -527,6 +527,12 @@ def collect_all_jobs() -> list[dict]:
             ("technical program manager senior remote hybrid", ""),
             ("business operations manager senior tech remote", ""),
             ("director business operations tech remote hybrid NY NJ", ""),
+            # Fractional / contract
+            ("fractional product manager tech remote", ""),
+            ("fractional operations manager remote", ""),
+            ("fractional chief of staff tech remote", ""),
+            ("contract product manager senior remote", ""),
+            ("interim operations director remote", ""),
         ]
         for query, loc in serpapi_queries:
             raw_jobs = search_jobs_serpapi(query, loc)
@@ -569,11 +575,11 @@ def collect_all_jobs() -> list[dict]:
 
     # ── Jobicy (free, no key needed) ─────────────────────────────────────────────
     jobicy_searches = [
-        "product manager",
-        "operations manager",
-        "product operations",
+        "product",
+        "operations",
+        "strategy",
+        "manager",
         "director",
-        "technical program manager",
     ]
     for kw in jobicy_searches:
         raw_jobs = search_jobicy(kw)
@@ -608,8 +614,8 @@ def filter_jobs(jobs: list[dict]) -> list[dict]:
     """
     Keep jobs that:
     - Are remote, OR hybrid in NJ/NY
-    - Match target seniority
-    - Are from tech companies (best-effort keyword filter)
+    - Match target seniority (mid-level through Director)
+    - Are in the right role categories
     """
     location_keywords = {
         "remote", "anywhere", "hybrid", "new york", "new jersey", "ny", "nj", "nyc"
@@ -619,9 +625,7 @@ def filter_jobs(jobs: list[dict]) -> list[dict]:
         "strategy", "operations & strategy", "strategy & operations",
         "strategy and operations", "operations and strategy",
     }
-    # Exclude VP and above
     exclude_seniority = {"vp", "vice president", "head of", "chief", "coo", "cto", "cpo"}
-    # Exclude clearly non-tech industries
     exclude_keywords = {
         "retail", "restaurant", "food service", "hospitality", "healthcare clinic",
         "manufacturing", "warehouse", "logistics driver"
@@ -634,21 +638,22 @@ def filter_jobs(jobs: list[dict]) -> list[dict]:
         desc = job["description"].lower()
         company = job["company"].lower()
 
-        # Location check
-        location_ok = any(kw in loc for kw in location_keywords)
-        if not location_ok:
+        # Fractional roles bypass location/seniority filters — they're globally remote by nature
+        if job.get("is_fractional"):
+            if not any(kw in combined for kw in exclude_keywords
+                       for combined in [f"{company} {desc}"]):
+                filtered.append(job)
             continue
 
-        # If hybrid, must be NJ or NY
+        # Location check
+        if not any(kw in loc for kw in location_keywords):
+            continue
         if "hybrid" in loc and not any(kw in loc for kw in {"new york", "new jersey", "ny", "nj", "nyc"}):
             continue
 
-        # Seniority check — must match target level
-        seniority_ok = any(kw in title for kw in seniority_keywords)
-        if not seniority_ok:
+        # Seniority check
+        if not any(kw in title for kw in seniority_keywords):
             continue
-
-        # Exclude VP and above
         if any(kw in title for kw in exclude_seniority):
             continue
 
@@ -662,137 +667,256 @@ def filter_jobs(jobs: list[dict]) -> list[dict]:
     return filtered
 
 
+# ─── Resume-Based Fit Scoring ──────────────────────────────────────────────────
+
+# Nicole's background distilled into weighted signal keywords
+NICOLE_PROFILE = {
+    "core_strengths": [
+        "operations", "product operations", "product management", "program management",
+        "strategy", "cross-functional", "go-to-market", "gtm", "saas", "marketplace",
+        "series a", "series b", "startup", "high-growth", "scale", "scaling",
+        "roadmap", "sprint", "agile", "okr", "kpi", "analytics", "bi",
+        "salesforce", "crm", "onboarding", "customer success", "retention",
+        "net revenue retention", "nrr", "process design", "workflow", "automation",
+        "stakeholder", "team leadership", "direct reports",
+    ],
+    "industries": [
+        "tech", "technology", "software", "platform", "fintech", "edtech",
+        "marketplace", "saas", "b2b", "startup",
+    ],
+    "fit_notes_map": {
+        # Title keyword → why Nicole is a fit
+        "product manager": "Nicole's 10+ years managing sprints, roadmaps, and cross-functional delivery at The Unquantifiable and Pinata align closely with this role.",
+        "product operations": "Nicole built product operations from the ground up at Pinata — owning CRM, analytics, OKRs, and customer lifecycle — making her a natural fit.",
+        "program manager": "Nicole's track record coordinating multi-phase initiatives across engineering, design, and external stakeholders maps directly to program management.",
+        "operations manager": "Nicole scaled operations teams and systems at ClassPass (5,000+ partners) and Pinata (SaaS transition, Series A), demonstrating exactly the scope this role requires.",
+        "strategy and operations": "Nicole's blend of strategic ownership (GTM, monetization, SaaS transition) and hands-on operations execution is a strong match for strategy & ops roles.",
+        "business operations": "Nicole's experience building CRM infrastructure, BI platforms, and cross-functional workflows at high-growth startups is directly relevant here.",
+        "director of operations": "Having led operations at both a scaling marketplace (ClassPass) and a SaaS startup (Pinata), Nicole is ready to step into a Director-level operations role.",
+        "director of product": "Nicole's product management experience — from requirement definition to roadmap planning across 7 clients — positions her well for a Director of Product role.",
+        "technical program manager": "Nicole's coordination of engineering, design, and business stakeholders across complex multi-phase initiatives reflects core TPM skills.",
+    }
+}
+
+
+def score_fit(job: dict) -> tuple[int, str]:
+    """
+    Score how well the job matches Nicole's profile.
+    Returns (score 0-100, fit_note string).
+    """
+    title = job["title"].lower()
+    desc = job["description"].lower()
+    combined = f"{title} {desc}"
+
+    score = 0
+
+    # Title match against core strengths
+    for kw in NICOLE_PROFILE["core_strengths"]:
+        if kw in combined:
+            score += 3
+
+    # Industry match
+    for kw in NICOLE_PROFILE["industries"]:
+        if kw in combined:
+            score += 4
+
+    # Cap at 100
+    score = min(score, 100)
+
+    # Generate fit note from title keyword mapping
+    fit_note = ""
+    for title_kw, note in NICOLE_PROFILE["fit_notes_map"].items():
+        if title_kw in title:
+            fit_note = note
+            break
+
+    # Generic fallback fit note
+    if not fit_note and score >= 40:
+        fit_note = "Nicole's operations and product management background at high-growth tech startups is a strong match for this role."
+    elif not fit_note:
+        fit_note = "Relevant to Nicole's cross-functional operations and product experience."
+
+    return score, fit_note
+
+
+def is_fractional(job: dict) -> bool:
+    """Detect fractional / contract / part-time opportunities."""
+    signals = ["fractional", "contract", "part-time", "part time", "freelance",
+               "interim", "consulting", "consultant", "gig", "hourly", "1099"]
+    combined = f"{job['title']} {job['description']} {job.get('source','')}".lower()
+    return any(s in combined for s in signals)
+
+
+def tag_and_score_jobs(jobs: list[dict]) -> list[dict]:
+    """Tag each job as fractional or full-time, add fit score and fit note."""
+    for job in jobs:
+        job["is_fractional"] = is_fractional(job)
+        job["fit_score"], job["fit_note"] = score_fit(job)
+    return jobs
+
+
 # ─── Email Composition ─────────────────────────────────────────────────────────
 
 JOB_CARD_TEMPLATE = """
-<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;
-            padding:24px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
-  <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-    <div>
-      <h3 style="margin:0 0 4px 0;font-size:18px;color:#1a202c;font-weight:700;">{title}</h3>
-      <a href="{company_website}" style="margin:0;font-size:15px;color:#4f46e5;font-weight:600;
-         text-decoration:underline;" target="_blank">{company}</a>
-    </div>
-    <span style="background:#ebf8ff;color:#2b6cb0;padding:4px 12px;border-radius:20px;
-                 font-size:13px;font-weight:600;white-space:nowrap;">{source}</span>
+<div style="background:#ffffff;border:1px solid {border_color};border-radius:12px;
+            padding:20px 24px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+
+  <!-- Title + Company -->
+  <div style="margin-bottom:10px;">
+    <h3 style="margin:0 0 3px 0;font-size:17px;color:#1a202c;font-weight:700;line-height:1.3;">{title}</h3>
+    <a href="{company_website}" style="font-size:14px;color:#4f46e5;font-weight:600;text-decoration:underline;"
+       target="_blank">{company}</a>
   </div>
 
-  <div style="display:flex;flex-wrap:wrap;gap:12px;margin:16px 0;">
-    <span style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:6px;
-                 padding:4px 10px;font-size:13px;color:#4a5568;">
-      📍 {location}
-    </span>
-    <span style="background:{salary_bg};border:1px solid #e2e8f0;border-radius:6px;
-                 padding:4px 10px;font-size:13px;color:{salary_color};font-weight:600;">
-      💰 {salary}
-    </span>
-    <span style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:6px;
-                 padding:4px 10px;font-size:13px;color:#718096;">
-      📅 Posted: {posted}
-    </span>
+  <!-- Meta pills -->
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+    <span style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:5px;
+                 padding:3px 9px;font-size:12px;color:#4a5568;">📍 {location}</span>
+    <span style="background:{salary_bg};border:1px solid #e2e8f0;border-radius:5px;
+                 padding:3px 9px;font-size:12px;color:{salary_color};font-weight:600;">💰 {salary}</span>
+    <span style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:5px;
+                 padding:3px 9px;font-size:12px;color:#718096;">📅 {posted}</span>
+    <span style="background:#ebf8ff;border:1px solid #bee3f8;border-radius:5px;
+                 padding:3px 9px;font-size:12px;color:#2b6cb0;">{source}</span>
   </div>
 
-  <p style="margin:0 0 16px 0;font-size:14px;color:#4a5568;line-height:1.6;">{description}</p>
+  <!-- Description: 1 sentence company + 1 sentence role -->
+  <p style="margin:0 0 10px 0;font-size:13px;color:#4a5568;line-height:1.6;">{description}</p>
 
-  <div style="display:flex;gap:12px;flex-wrap:wrap;">
-    <a href="{apply_link}" style="background:#4f46e5;color:#ffffff;padding:10px 20px;
-       border-radius:8px;text-decoration:none;font-size:14px;font-weight:600;">
-      Apply Now →
-    </a>
-    <a href="{hiring_contact}" style="background:#f7fafc;color:#4f46e5;padding:10px 20px;
-       border-radius:8px;text-decoration:none;font-size:14px;font-weight:600;
-       border:1px solid #e2e8f0;">
-      🔗 Find Hiring Manager on LinkedIn
-    </a>
+  <!-- Fit note -->
+  {fit_note_html}
+
+  <!-- Apply button -->
+  <a href="{apply_link}" style="display:inline-block;margin-top:12px;background:#4f46e5;color:#ffffff;
+     padding:9px 18px;border-radius:7px;text-decoration:none;font-size:13px;font-weight:600;">
+    Apply Now →
+  </a>
+</div>
+"""
+
+FIT_NOTE_HTML = """
+  <div style="background:#f0fdf4;border-left:3px solid #22c55e;padding:8px 12px;
+              border-radius:0 6px 6px 0;margin-bottom:4px;">
+    <p style="margin:0;font-size:12px;color:#166534;line-height:1.5;">
+      <strong>✨ Why you're a fit:</strong> {fit_note}
+    </p>
+  </div>
+"""
+
+SECTION_HEADER_TEMPLATE = """
+<div style="margin:32px 0 16px 0;">
+  <div style="background:{bg};border-radius:10px;padding:16px 20px;">
+    <h2 style="margin:0 0 4px 0;font-size:20px;font-weight:800;color:{color};">{icon} {title}</h2>
+    <p style="margin:0;font-size:13px;color:{subcolor};">{subtitle}</p>
   </div>
 </div>
 """
 
 
-def build_email_html(jobs: list[dict]) -> str:
-    today = datetime.now().strftime("%B %d, %Y")
-    count = len(jobs)
-
+def render_cards(jobs: list[dict], top_fit_threshold: int = 55) -> str:
+    """Render a list of job dicts into HTML cards."""
     if not jobs:
-        body_content = """
-        <div style="text-align:center;padding:48px 24px;color:#718096;">
-          <p style="font-size:18px;">No new matching jobs found this week.</p>
-          <p>Check back next Monday — new roles are posted daily!</p>
-        </div>
-        """
-    else:
-        cards = ""
-        for job in jobs:
-            salary_has_data = job["salary"] not in ("Not listed", "", None, "N/A")
-            cards += JOB_CARD_TEMPLATE.format(
-                title=job["title"],
-                company=job["company"],
-                company_website=job["company_website"],
-                location=job["location"],
-                salary=job["salary"],
-                salary_bg="#f0fff4" if salary_has_data else "#f7fafc",
-                salary_color="#276749" if salary_has_data else "#718096",
-                posted=job["posted"],
-                description=job["description"],
-                apply_link=job["apply_link"],
-                hiring_contact=job["hiring_contact"],
-                source=job["source"],
-            )
-        body_content = cards
+        return '<p style="color:#718096;font-size:14px;padding:12px 0;">No matching roles found this week.</p>'
 
-    return f"""
-<!DOCTYPE html>
+    html = ""
+    for job in jobs:
+        salary_has_data = job["salary"] not in ("Not listed", "", None, "N/A")
+        is_top = job.get("fit_score", 0) >= top_fit_threshold
+
+        fit_note_html = FIT_NOTE_HTML.format(fit_note=job.get("fit_note", "")) if job.get("fit_note") else ""
+
+        html += JOB_CARD_TEMPLATE.format(
+            title=job["title"],
+            company=job["company"],
+            company_website=job["company_website"],
+            location=job["location"],
+            salary=job["salary"],
+            salary_bg="#f0fff4" if salary_has_data else "#f7fafc",
+            salary_color="#276749" if salary_has_data else "#718096",
+            posted=job["posted"],
+            description=job["description"],
+            apply_link=job["apply_link"],
+            source=job["source"],
+            fit_note_html=fit_note_html,
+            border_color="#bbf7d0" if is_top else "#e2e8f0",
+        )
+    return html
+
+
+def build_email_html(fulltime_jobs: list[dict], fractional_jobs: list[dict]) -> str:
+    today = datetime.now().strftime("%B %d, %Y")
+    total = len(fulltime_jobs) + len(fractional_jobs)
+
+    # Sort full-time: top fit first, then by salary availability
+    fulltime_jobs.sort(key=lambda j: (-j.get("fit_score", 0),
+                                       j["salary"] in ("Not listed", "", None, "N/A")))
+    fractional_jobs.sort(key=lambda j: (-j.get("fit_score", 0),
+                                         j["salary"] in ("Not listed", "", None, "N/A")))
+
+    ft_section = SECTION_HEADER_TEMPLATE.format(
+        bg="#eef2ff", color="#3730a3", subcolor="#6366f1",
+        icon="💼", title="Full-Time Roles",
+        subtitle=f"{len(fulltime_jobs)} role{'s' if len(fulltime_jobs) != 1 else ''} · Remote or Hybrid (NJ/NY) · PM, Operations & Strategy"
+    ) + render_cards(fulltime_jobs)
+
+    frac_section = SECTION_HEADER_TEMPLATE.format(
+        bg="#fdf4ff", color="#7e22ce", subcolor="#a855f7",
+        icon="⚡", title="Fractional & Contract Opportunities",
+        subtitle=f"{len(fractional_jobs)} opportunit{'ies' if len(fractional_jobs) != 1 else 'y'} · Flexible engagements in PM, Operations & Strategy"
+    ) + render_cards(fractional_jobs)
+
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Your Weekly Job Digest</title>
+  <title>Nicole's Weekly Job Digest</title>
 </head>
 <body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,
              'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
 
   <!-- Header -->
-  <div style="background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 100%);padding:40px 24px;text-align:center;">
-    <p style="margin:0 0 8px 0;color:#c7d2fe;font-size:14px;letter-spacing:2px;
+  <div style="background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 100%);padding:36px 24px;text-align:center;">
+    <p style="margin:0 0 6px 0;color:#c7d2fe;font-size:13px;letter-spacing:2px;
               text-transform:uppercase;font-weight:600;">Weekly Job Digest</p>
-    <h1 style="margin:0 0 8px 0;color:#ffffff;font-size:32px;font-weight:800;">
-      Your Job Matches 🚀
+    <h1 style="margin:0 0 6px 0;color:#ffffff;font-size:28px;font-weight:800;">
+      Hey Nicole, here are your matches 👋
     </h1>
-    <p style="margin:0;color:#a5b4fc;font-size:16px;">{today}</p>
+    <p style="margin:0;color:#a5b4fc;font-size:15px;">{today}</p>
   </div>
 
-  <!-- Summary Bar -->
-  <div style="background:#ffffff;border-bottom:1px solid #e2e8f0;padding:16px 24px;text-align:center;">
-    <p style="margin:0;font-size:15px;color:#4a5568;">
-      Found <strong style="color:#4f46e5;">{count} matching role{"s" if count != 1 else ""}</strong>
-      in Operations &amp; Product Management &nbsp;·&nbsp;
-      Remote / Hybrid (NJ &amp; NY) &nbsp;·&nbsp;
-      Mid-level through VP+
+  <!-- Summary bar -->
+  <div style="background:#ffffff;border-bottom:1px solid #e2e8f0;padding:14px 24px;text-align:center;">
+    <p style="margin:0;font-size:14px;color:#4a5568;">
+      <strong style="color:#4f46e5;">{len(fulltime_jobs)} full-time</strong> and
+      <strong style="color:#7c3aed;">{len(fractional_jobs)} fractional</strong> roles this week
+      &nbsp;·&nbsp; Roles highlighted in green are top fits based on your resume
     </p>
   </div>
 
-  <!-- Main Content -->
-  <div style="max-width:700px;margin:32px auto;padding:0 16px;">
-    {body_content}
+  <!-- Content -->
+  <div style="max-width:680px;margin:24px auto;padding:0 16px;">
+    {ft_section}
+    <div style="margin-top:36px;">
+      {frac_section}
+    </div>
   </div>
 
   <!-- Footer -->
-  <div style="text-align:center;padding:32px 24px;color:#a0aec0;font-size:13px;">
-    <p style="margin:0 0 4px 0;">This digest is generated every Monday at 10 AM.</p>
-    <p style="margin:0;">Jobs shown were posted in the past 30 days.
-       Always verify listing details before applying.</p>
+  <div style="text-align:center;padding:28px 24px;color:#a0aec0;font-size:12px;">
+    <p style="margin:0 0 4px 0;">Sent every Monday at 10 AM · Jobs posted in the past 30 days</p>
+    <p style="margin:0;">Always verify listing details before applying.</p>
   </div>
 
 </body>
-</html>
-"""
+</html>"""
 
 
 # ─── Send Email ────────────────────────────────────────────────────────────────
 
-def send_email(service, html_body: str, job_count: int):
+def send_email(service, html_body: str, fulltime_count: int, fractional_count: int):
     today = datetime.now().strftime("%B %d, %Y")
-    subject = f"🔍 Your Weekly Job Digest — {job_count} New Role{'s' if job_count != 1 else ''} ({today})"
+    subject = f"🔍 Your Job Digest — {fulltime_count} Full-Time + {fractional_count} Fractional Roles ({today})"
 
     message = MIMEMultipart("alternative")
     message["Subject"] = subject
@@ -816,17 +940,20 @@ def main():
     jobs = collect_all_jobs()
     print(f"   Raw jobs collected: {len(jobs)}")
 
+    jobs = tag_and_score_jobs(jobs)
     jobs = filter_jobs(jobs)
     print(f"   Jobs after filtering: {len(jobs)}")
 
-    # Sort: salary-disclosed first, then alphabetical by company
-    jobs.sort(key=lambda j: (j["salary"] in ("Not listed", "", None, "N/A"), j["company"].lower()))
+    fulltime_jobs  = [j for j in jobs if not j.get("is_fractional")]
+    fractional_jobs = [j for j in jobs if j.get("is_fractional")]
 
-    html = build_email_html(jobs)
+    print(f"   Full-time: {len(fulltime_jobs)} · Fractional: {len(fractional_jobs)}")
+
+    html = build_email_html(fulltime_jobs, fractional_jobs)
 
     print("📧 Sending email via Gmail API...")
     service = get_gmail_service()
-    send_email(service, html, len(jobs))
+    send_email(service, html, len(fulltime_jobs), len(fractional_jobs))
     print("✅ Done.")
 
 
